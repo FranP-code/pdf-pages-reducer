@@ -3,8 +3,8 @@ import { PDFDocument, degrees } from "pdf-lib";
 import * as fs from "fs";
 import * as path from "path";
 
-// Extend the orientation type to include "stacked"
-type OrientationType = "horizontal" | "vertical" | "stacked";
+// Extend the orientation type to include "stacked" and "grid"
+type OrientationType = "horizontal" | "vertical" | "stacked" | "grid";
 
 interface Answers {
 	operation: string;
@@ -13,6 +13,33 @@ interface Answers {
 	orientation: OrientationType;
 	specifyPaperSize: boolean;
 	selectedSize: [number, number];
+	rotateGridPages?: boolean; // New property to track if grid pages should be rotated
+}
+
+// -------------- Utility function to ensure unique filenames --------------
+function getUniqueFilePath(filePath: string): string {
+	if (!fs.existsSync(filePath)) {
+		return filePath;
+	}
+
+	const dir = path.dirname(filePath);
+	const ext = path.extname(filePath);
+	const baseName = path.basename(filePath, ext);
+
+	// Check if the filename already ends with a pattern like (1), (2), etc.
+	const match = baseName.match(/^(.*?)(\(\d+\))?$/);
+	const nameWithoutCounter = match ? match[1].trim() : baseName;
+
+	let counter = 1;
+	let newPath = filePath;
+
+	// Keep incrementing counter until we find a filename that doesn't exist
+	while (fs.existsSync(newPath)) {
+		newPath = path.join(dir, `${nameWithoutCounter}(${counter})${ext}`);
+		counter++;
+	}
+
+	return newPath;
 }
 
 // -------------- Existing duplicate function --------------
@@ -39,7 +66,8 @@ async function duplicatePages(
 async function combinePages2In1(
 	inputPath: string,
 	orientation: OrientationType,
-	paperSize?: [number, number]
+	paperSize?: [number, number],
+	rotateGridPages?: boolean // New parameter to track if grid pages should be rotated
 ): Promise<Uint8Array> {
 	// 1) Load the input PDF
 	const pdfBytes = fs.readFileSync(inputPath);
@@ -65,11 +93,11 @@ async function combinePages2In1(
 		// Add a blank page in the new PDF
 		const newPage = newPdf.addPage([finalWidth, finalHeight]);
 
-		// Copy the same page twice
+		// Copy the same page twice (or four times for grid)
 		const [origPage1] = await newPdf.copyPages(originalPdf, [i]);
 		const [origPage2] = await newPdf.copyPages(originalPdf, [i]);
 
-		// Embed them
+		// Embed the pages
 		const embedded1 = await newPdf.embedPage(origPage1);
 		const embedded2 = await newPdf.embedPage(origPage2);
 
@@ -162,6 +190,133 @@ async function combinePages2In1(
 				yScale: scale,
 				rotate: degrees(90),
 			});
+		} else if (orientation === "grid") {
+			// ---------------------------------------------------
+			// "GRID" = 2x2 grid with 4 copies
+			// ---------------------------------------------------
+			//
+			//  ┌─────────┬─────────┐
+			//  │ Page1   │  Page2  │
+			//  ├─────────┼─────────┤
+			//  │ Page3   │  Page4  │
+			//  └─────────┴─────────┘
+			//
+			// Each cell is finalWidth/2 wide, finalHeight/2 tall.
+
+			// We need two more copies of the page for the grid layout
+			const [origPage3] = await newPdf.copyPages(originalPdf, [i]);
+			const [origPage4] = await newPdf.copyPages(originalPdf, [i]);
+
+			const embedded3 = await newPdf.embedPage(origPage3);
+			const embedded4 = await newPdf.embedPage(origPage4);
+
+			const slotWidth = finalWidth / 2;
+			const slotHeight = finalHeight / 2;
+
+			if (rotateGridPages) {
+				// When rotated 90 degrees, width and height are swapped for scaling calculation
+				const scale = Math.min(slotWidth / h, slotHeight / w);
+
+				// Calculate offsets with rotated dimensions
+				// Top-left cell (Page1)
+				const offsetX1 = (slotWidth - h * scale) / 2;
+				const offsetY1 = slotHeight + (slotHeight - w * scale) / 2;
+
+				// Top-right cell (Page2)
+				const offsetX2 = slotWidth + (slotWidth - h * scale) / 2;
+				const offsetY2 = offsetY1;
+
+				// Bottom-left cell (Page3)
+				const offsetX3 = offsetX1;
+				const offsetY3 = (slotHeight - w * scale) / 2;
+
+				// Bottom-right cell (Page4)
+				const offsetX4 = offsetX2;
+				const offsetY4 = offsetY3;
+
+				// Draw all four copies with rotation
+				newPage.drawPage(embedded1, {
+					x: offsetX1 + h * scale,
+					y: offsetY1,
+					xScale: scale,
+					yScale: scale,
+					rotate: degrees(90),
+				});
+
+				newPage.drawPage(embedded2, {
+					x: offsetX2 + h * scale,
+					y: offsetY2,
+					xScale: scale,
+					yScale: scale,
+					rotate: degrees(90),
+				});
+
+				newPage.drawPage(embedded3, {
+					x: offsetX3 + h * scale,
+					y: offsetY3,
+					xScale: scale,
+					yScale: scale,
+					rotate: degrees(90),
+				});
+
+				newPage.drawPage(embedded4, {
+					x: offsetX4 + h * scale,
+					y: offsetY4,
+					xScale: scale,
+					yScale: scale,
+					rotate: degrees(90),
+				});
+			} else {
+				// No rotation, standard grid placement
+				const scale = Math.min(slotWidth / w, slotHeight / h);
+				const scaledW = w * scale;
+				const scaledH = h * scale;
+
+				// Calculate offsets for top-left cell (Page1)
+				const offsetX1 = (slotWidth - scaledW) / 2;
+				const offsetY1 = slotHeight + (slotHeight - scaledH) / 2;
+
+				// Calculate offsets for top-right cell (Page2)
+				const offsetX2 = slotWidth + (slotWidth - scaledW) / 2;
+				const offsetY2 = offsetY1;
+
+				// Calculate offsets for bottom-left cell (Page3)
+				const offsetX3 = offsetX1;
+				const offsetY3 = (slotHeight - scaledH) / 2;
+
+				// Calculate offsets for bottom-right cell (Page4)
+				const offsetX4 = offsetX2;
+				const offsetY4 = offsetY3;
+
+				// Draw all four copies without rotation
+				newPage.drawPage(embedded1, {
+					x: offsetX1,
+					y: offsetY1,
+					xScale: scale,
+					yScale: scale,
+				});
+
+				newPage.drawPage(embedded2, {
+					x: offsetX2,
+					y: offsetY2,
+					xScale: scale,
+					yScale: scale,
+				});
+
+				newPage.drawPage(embedded3, {
+					x: offsetX3,
+					y: offsetY3,
+					xScale: scale,
+					yScale: scale,
+				});
+
+				newPage.drawPage(embedded4, {
+					x: offsetX4,
+					y: offsetY4,
+					xScale: scale,
+					yScale: scale,
+				});
+			}
 		} else {
 			// ---------------------------------------------------
 			// "STACKED" = top & bottom WITHOUT rotation
@@ -268,9 +423,11 @@ async function main() {
 			});
 
 			// Output path for duplicated pages
-			const outputPath = path.join(
-				path.dirname(pdfPath),
-				`${path.basename(pdfPath, ".pdf")}_duplicated.pdf`
+			const outputPath = getUniqueFilePath(
+				path.join(
+					path.dirname(pdfPath),
+					`${path.basename(pdfPath, ".pdf")}_duplicated.pdf`
+				)
 			);
 
 			// Duplicate
@@ -285,6 +442,7 @@ async function main() {
 			//   - "vertical" => side by side
 			//   - "horizontal" => top/bottom with rotation
 			//   - "stacked" => top/bottom no rotation
+			//   - "grid" => 2x2 grid with 4 copies
 			const { orientation } = await inquirer.prompt<
 				Pick<Answers, "orientation">
 			>({
@@ -295,8 +453,24 @@ async function main() {
 					{ name: "Vertical (side-by-side)", value: "vertical" },
 					{ name: "Horizontal (top/bottom, rotated)", value: "horizontal" },
 					{ name: "Stacked (top/bottom, no rotation)", value: "stacked" },
+					{ name: "Grid (2x2)", value: "grid" },
 				],
 			});
+
+			// If grid layout is selected, ask if user wants to rotate pages 90 degrees
+			let rotateGridPages = false;
+			if (orientation === "grid") {
+				const { shouldRotate } = await inquirer.prompt<{
+					shouldRotate: boolean;
+				}>({
+					type: "confirm",
+					name: "shouldRotate",
+					message:
+						"Would you like to rotate each copy by 90 degrees (horizontally) in the grid?",
+					default: false,
+				});
+				rotateGridPages = shouldRotate;
+			}
 
 			// 4.2) Ask if user wants to specify a paper size
 			const { specifyPaperSize } = await inquirer.prompt<
@@ -328,16 +502,19 @@ async function main() {
 			}
 
 			// 4.3) Output path
-			const outputPath = path.join(
-				path.dirname(pdfPath),
-				`${path.basename(pdfPath, ".pdf")}_2up.pdf`
+			const outputPath = getUniqueFilePath(
+				path.join(
+					path.dirname(pdfPath),
+					`${path.basename(pdfPath, ".pdf")}_2up.pdf`
+				)
 			);
 
 			// 4.4) Generate the 2-up PDF
 			const pdfBytes = await combinePages2In1(
 				pdfPath,
 				orientation,
-				chosenPaperSize
+				chosenPaperSize,
+				rotateGridPages // Pass the rotation preference to the function
 			);
 			fs.writeFileSync(outputPath, pdfBytes);
 
